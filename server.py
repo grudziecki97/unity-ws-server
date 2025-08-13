@@ -53,61 +53,80 @@ async def broadcast(obj, exclude=None):
             pass
 
 async def handle(ws):
+    import json  # na wypadek, gdybyś przeniósł importy
     global NEXT_ID, USERS
+
+    print("client connected", flush=True)
+
     authed_id = None
     authed_email = None
+
     try:
         async for msg in ws:
-            # bezpieczne parsowanie
+            # Bezpieczne parsowanie JSON
             try:
                 data = json.loads(msg)
             except json.JSONDecodeError:
-                await send(ws, {"type":"error","code":"bad_json","message":"Invalid JSON"})
+                await send(ws, {"type": "error", "code": "bad_json", "message": "Invalid JSON"})
                 continue
 
             t = data.get("type")
 
-            # --- logowanie ---
+            # --------- LOGIN ---------
             if t == "login":
                 email = (data.get("email") or "").strip().lower()
                 password = data.get("password") or ""
-                u = USERS.get(email)
 
+                print("login attempt:", email, flush=True)
+
+                u = USERS.get(email)
                 if not u or sha256(password) != u["password_sha256"]:
-                    await send(ws, {"type":"error","code":"bad_credentials","message":"Błędny e-mail lub hasło"})
+                    print("login failed (bad credentials):", email, flush=True)
+                    await send(ws, {"type": "error", "code": "bad_credentials", "message": "Błędny e-mail lub hasło"})
                     continue
 
                 if email in ACTIVE_EMAILS:
-                    await send(ws, {"type":"error","code":"already_online","message":"Użytkownik jest już zalogowany gdzie indziej"})
+                    print("login rejected (already online):", email, flush=True)
+                    await send(ws, {"type": "error", "code": "already_online", "message": "Użytkownik jest już zalogowany gdzie indziej"})
                     continue
 
-                pid = NEXT_ID; NEXT_ID += 1
+                pid = NEXT_ID
+                NEXT_ID += 1
+
                 CLIENTS[ws] = {"id": pid, "email": email}
                 ACTIVE_EMAILS.add(email)
-                name = u.get("display_name") or email.split("@")[0]
 
-                PLAYERS[pid] = {"email": email, "name": name, "pos":[0,0,0], "rot":[0,0,0]}
+                name = u.get("display_name") or email.split("@")[0]
+                PLAYERS[pid] = {"email": email, "name": name, "pos": [0, 0, 0], "rot": [0, 0, 0]}
+
                 authed_id = pid
                 authed_email = email
 
+                print("login ok:", email, "pid", pid, flush=True)
+
                 await send(ws, {
-                    "type":"welcome", "id": pid,
+                    "type": "welcome",
+                    "id": pid,
                     "self": {"email": email, "name": name},
-                    "players":[{"id":i,"name":p["name"],"pos":p["pos"],"rot":p["rot"]}
-                               for i,p in PLAYERS.items() if i!=pid]
+                    "players": [
+                        {"id": i, "name": p["name"], "pos": p["pos"], "rot": p["rot"]}
+                        for i, p in PLAYERS.items() if i != pid
+                    ]
                 })
-                await broadcast({"type":"spawn","id":pid,"name":name}, exclude=ws)
+
+                await broadcast({"type": "spawn", "id": pid, "name": name}, exclude=ws)
                 continue
 
-            # --- aktualizacja pozycji ---
+            # --------- STATE UPDATE ---------
             if t == "state" and authed_id:
-                pos = data.get("pos",[0,0,0]); rot = data.get("rot",[0,0,0])
+                pos = data.get("pos", [0, 0, 0])
+                rot = data.get("rot", [0, 0, 0])
                 PLAYERS[authed_id]["pos"] = pos
                 PLAYERS[authed_id]["rot"] = rot
-                await broadcast({"type":"state","id":authed_id,"pos":pos,"rot":rot}, exclude=ws)
+                await broadcast({"type": "state", "id": authed_id, "pos": pos, "rot": rot}, exclude=ws)
                 continue
 
-            # --- zmiana wyświetlanej nazwy (opcjonalnie z UI) ---
+            # --------- RENAME (opcjonalnie) ---------
             if t == "set_name" and authed_id:
                 name = (data.get("name") or "").strip()[:20]
                 if name:
@@ -115,41 +134,50 @@ async def handle(ws):
                     if authed_email in USERS:
                         USERS[authed_email]["display_name"] = name
                         save_users(USERS)
-                    await broadcast({"type":"rename","id":authed_id,"name":name})
+                    await broadcast({"type": "rename", "id": authed_id, "name": name})
+                    print("rename:", authed_email, "->", name, flush=True)
                 continue
 
-            # --- rejestracja nowego konta (opcjonalnie) ---
+            # --------- REGISTER (opcjonalnie) ---------
             if t == "register":
                 email = (data.get("email") or "").strip().lower()
                 password = data.get("password") or ""
                 display_name = (data.get("displayName") or "").strip() or email.split("@")[0]
+
+                print("register attempt:", email, flush=True)
+
                 if not email or not password:
-                    await send(ws, {"type":"error","code":"missing_fields","message":"email i hasło są wymagane"})
+                    await send(ws, {"type": "error", "code": "missing_fields", "message": "email i hasło są wymagane"})
                     continue
                 if email in USERS:
-                    await send(ws, {"type":"error","code":"exists","message":"Użytkownik już istnieje"})
+                    await send(ws, {"type": "error", "code": "exists", "message": "Użytkownik już istnieje"})
                     continue
+
                 USERS[email] = {
                     "email": email,
                     "password_sha256": sha256(password),
                     "display_name": display_name[:20]
                 }
                 save_users(USERS)
-                await send(ws, {"type":"registered"})
+                await send(ws, {"type": "registered"})
+                print("registered:", email, flush=True)
                 continue
 
-            # nieznany typ komunikatu
-            await send(ws, {"type":"error","code":"unknown_type","message": f"Nieznany typ: {t}"})
+            # --------- UNKNOWN TYPE ---------
+            print("unknown message:", data, flush=True)
+            await send(ws, {"type": "error", "code": "unknown_type", "message": f"Nieznany typ: {t}"})
 
     finally:
-        # sprzątanie po rozłączeniu
+        # Sprzątanie po rozłączeniu
         info = CLIENTS.pop(ws, None)
         if info:
             pid = info["id"]
             email = info["email"]
             ACTIVE_EMAILS.discard(email)
             PLAYERS.pop(pid, None)
-            await broadcast({"type":"despawn","id":pid})
+            print("client disconnected:", email, "pid", pid, flush=True)
+            await broadcast({"type": "despawn", "id": pid})
+
 
 async def main():
     port = int(os.environ.get("PORT", "8080"))  # Koyeb poda port w $PORT
