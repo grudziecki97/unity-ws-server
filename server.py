@@ -56,7 +56,7 @@ NEXT_ID = 1
 # ---------- trwały zapis ostatnich pozycji ----------
 SAVE_PATH = "lastpos.json"          # email -> {"pos":[x,y,z], "rot":[x,y,z]}
 LAST_POS: dict[str, dict] = {}
-_last_flush = 0.0
+LAST_SAVE_AT: dict[str, float] = {} # e-mail -> kiedy ostatnio flushowaliśmy
 
 def load_lastpos():
     global LAST_POS
@@ -78,7 +78,7 @@ def save_lastpos_atomic():
 
 async def autosave_loop():
     while True:
-        await asyncio.sleep(5)      # co 5 s spłucz do pliku
+        await asyncio.sleep(2)      # częściej flushuj
         save_lastpos_atomic()
 
 load_lastpos()
@@ -160,7 +160,14 @@ async def handle(ws):
                     ]
                 })
 
-                await broadcast({"type": "spawn", "id": pid, "name": name}, exclude=ws)
+                # (opcjonalnie: możesz też broadcastować pos/rot nowego gracza)
+                await broadcast({
+                    "type": "spawn",
+                    "id": pid,
+                    "name": name,
+                    "pos": start["pos"],
+                    "rot": start["rot"]
+                }, exclude=ws)
                 continue
 
             # ---------- STATE ----------
@@ -172,10 +179,13 @@ async def handle(ws):
                 PLAYERS[authed_id]["pos"] = pos
                 PLAYERS[authed_id]["rot"] = rot
 
-                # zapamiętaj ostatnią pozycję gracza (po e-mailu)
+                # zapamiętaj ostatnią pozycję gracza (po e-mailu) + throttling zapisu
                 if authed_email:
                     LAST_POS[authed_email] = {"pos": pos, "rot": rot}
-                # autosave_loop zapisze do pliku co 5 s
+                    now = time.time()
+                    if now - LAST_SAVE_AT.get(authed_email, 0.0) > 1.0:
+                        save_lastpos_atomic()
+                        LAST_SAVE_AT[authed_email] = now
 
                 await broadcast({"type": "state", "id": authed_id, "pos": pos, "rot": rot}, exclude=ws)
                 continue
@@ -186,6 +196,7 @@ async def handle(ws):
                 rot = data.get("rot", [0, 0, 0])
                 LAST_POS[authed_email] = {"pos": pos, "rot": rot}
                 save_lastpos_atomic()  # natychmiastowy zapis
+                LAST_SAVE_AT[authed_email] = time.time()
                 continue
 
             # ---------- SET NAME ----------
@@ -251,7 +262,7 @@ async def handle(ws):
             PLAYERS.pop(pid, None)
             print("client disconnected:", email, "pid", pid, flush=True)
             await broadcast({"type": "despawn", "id": pid})
-            # szybki flush pozycji do pliku (gdyby coś jeszcze nie spłynęło)
+            # szybki flush pozycji do pliku
             save_lastpos_atomic()
 
 # ---------- start serwera ----------
